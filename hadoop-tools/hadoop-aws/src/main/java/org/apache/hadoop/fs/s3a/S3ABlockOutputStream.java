@@ -20,6 +20,7 @@ package org.apache.hadoop.fs.s3a;
 
 import java.io.IOException;
 import java.io.OutputStream;
+import java.security.MessageDigest;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.concurrent.Callable;
@@ -37,6 +38,7 @@ import com.amazonaws.services.s3.model.PartETag;
 import com.amazonaws.services.s3.model.PutObjectRequest;
 import com.amazonaws.services.s3.model.PutObjectResult;
 import com.amazonaws.services.s3.model.UploadPartRequest;
+import com.amazonaws.util.Base64;
 import com.google.common.base.Preconditions;
 import com.google.common.util.concurrent.Futures;
 import com.google.common.util.concurrent.ListenableFuture;
@@ -47,6 +49,7 @@ import org.slf4j.LoggerFactory;
 
 import org.apache.hadoop.classification.InterfaceAudience;
 import org.apache.hadoop.classification.InterfaceStability;
+import org.apache.hadoop.io.MD5Hash;
 import org.apache.hadoop.io.retry.RetryPolicies;
 import org.apache.hadoop.io.retry.RetryPolicy;
 import org.apache.hadoop.util.Progressable;
@@ -120,6 +123,11 @@ class S3ABlockOutputStream extends OutputStream {
   private final S3AFileSystem.WriteOperationHelper writeOperationHelper;
 
   /**
+   * MD5 Checksum for ContentMD.
+   */
+  private final MessageDigest messageDigest;
+  
+  /**
    * An S3A output stream which uploads partitions in a separate pool of
    * threads; different {@link S3ADataBlocks.BlockFactory}
    * instances can control where data is buffered.
@@ -156,6 +164,7 @@ class S3ABlockOutputStream extends OutputStream {
         "Block size is too small: %d", blockSize);
     this.executorService = MoreExecutors.listeningDecorator(executorService);
     this.multiPartUpload = null;
+    this.messageDigest = MD5Hash.getDigester();
     this.progressListener = (progress instanceof ProgressListener) ?
         (ProgressListener) progress
         : new ProgressableListener(progress);
@@ -286,6 +295,7 @@ class S3ABlockOutputStream extends OutputStream {
         uploadCurrentBlock();
       }
     }
+    messageDigest.update(source, offset, len);
   }
 
   /**
@@ -380,6 +390,11 @@ class S3ABlockOutputStream extends OutputStream {
     final PutObjectRequest putObjectRequest = uploadData.hasFile() ?
         writeOperationHelper.newPutRequest(uploadData.getFile())
         : writeOperationHelper.newPutRequest(uploadData.getUploadStream(), size);
+    if (uploadData.hasFile()) {
+        // Only calculate and set MD5 for single part puts
+        final String md5Base64 = Base64.encodeAsString(messageDigest.digest());
+        putObjectRequest.getMetadata().setContentMD5(md5Base64);
+    }
     fs.setOptionalPutRequestParameters(putObjectRequest);
     long transferQueueTime = now();
     BlockUploadProgress callback =
